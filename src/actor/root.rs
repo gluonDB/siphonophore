@@ -46,8 +46,8 @@ impl Actor for Root {
     }
 }
 
-use crate::actor::messages::{CreateClient, RequestDoc, PersistDocument, PersistNow, ApplyServerUpdate};
-use crate::actor::document::{ApplyUpdate, DocActorArgs};
+use crate::actor::messages::{CreateClient, RequestDoc, PersistDocument, PersistNow, ApplyServerUpdate, BroadcastText};
+use crate::actor::document::{ApplyUpdate, DocActorArgs, GetPeerCount};
 use crate::actor::client::ClientActorArgs;
 
 impl Message<RequestDoc> for Root {
@@ -87,5 +87,26 @@ impl Message<ApplyServerUpdate> for Root {
         if let Some(doc) = self.active_docs.get(&msg.doc_id) {
             doc.tell(ApplyUpdate(msg.update)).send().await.is_ok()
         } else { false }
+    }
+}
+
+impl Message<BroadcastText> for Root {
+    type Reply = bool;
+    async fn handle(&mut self, msg: BroadcastText, _: &mut Context<Self, Self::Reply>) -> bool {
+        if let Some(doc) = self.active_docs.get(&msg.doc_id) {
+            doc.tell(msg).send().await.is_ok()
+        } else { false }
+    }
+}
+
+/// Get peer count for a document.
+pub struct GetDocPeerCount(pub Arc<str>);
+
+impl Message<GetDocPeerCount> for Root {
+    type Reply = usize;
+    async fn handle(&mut self, GetDocPeerCount(doc_id): GetDocPeerCount, _: &mut Context<Self, Self::Reply>) -> usize {
+        if let Some(doc) = self.active_docs.get(&doc_id) {
+            doc.ask(GetPeerCount).send().await.unwrap_or(0)
+        } else { 0 }
     }
 }

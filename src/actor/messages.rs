@@ -36,3 +36,14 @@ pub struct ApplyServerUpdate {
     pub doc_id: Arc<str>,
     pub update: Vec<u8>,
 }
+
+/// Send a text message to a specific client.
+pub struct SendText(pub String);
+
+/// Broadcast a text message to all clients in a document.
+pub struct BroadcastText {
+    pub doc_id: Arc<str>,
+    pub message: String,
+    /// If Some, exclude this client from the broadcast.
+    pub exclude_client: Option<ActorId>,
+}

@@ -3,5 +3,5 @@ mod document;
 mod client;
 pub(crate) mod messages;
 
-pub(crate) use root::Root;
-pub(crate) use messages::{CreateClient, PersistDocument, ApplyServerUpdate};
+pub(crate) use root::{Root, GetDocPeerCount};
+pub(crate) use messages::{CreateClient, PersistDocument, ApplyServerUpdate, BroadcastText};

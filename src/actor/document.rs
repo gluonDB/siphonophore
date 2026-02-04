@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::ops::ControlFlow;
 use std::future::Future;
 
-use crate::hooks::{Hook, Context, OnLoadDocumentPayload, OnChangePayload, OnDisconnectPayload, OnSavePayload, BeforeCloseDirtyPayload};
+use crate::hooks::{Hook, Context, OnLoadDocumentPayload, OnChangePayload, OnDisconnectPayload, OnSavePayload, BeforeCloseDirtyPayload, OnPeerJoinedPayload, OnPeerLeftPayload};
 use crate::actor::client::ClientActor;
-use crate::actor::messages::{IdleShutdown, YjsData, ConnectClient, DisconnectClient, WirePayload, PersistNow};
+use crate::actor::messages::{IdleShutdown, YjsData, ConnectClient, DisconnectClient, WirePayload, PersistNow, SendText, BroadcastText};
 use crate::payload::encode_with_doc_id;
 
 const MSG_SYNC: u8 = 0;
@@ -49,17 +49,30 @@ impl DocActor {
     fn handle_client_left(&mut self, client_id: ActorId) -> bool {
         if let Some(awareness_id) = self.client_awareness_ids.remove(&client_id) { self.awareness.remove_state(awareness_id); }
         self.clients.remove(&client_id);
-        
+        let peer_count = self.clients.len();
+
         if let Some(context) = self.contexts.remove(&client_id) {
             let doc_id = Arc::clone(&self.doc_id);
             let hooks = Arc::clone(&self.hooks);
             tokio::spawn(async move {
                 for hook in hooks.iter() {
                     let _ = hook.on_disconnect(OnDisconnectPayload { doc_id: &doc_id, client_id, context: &context }).await;
+                    let _ = hook.on_peer_left(OnPeerLeftPayload { doc_id: &doc_id, client_id, context: &context, peer_count }).await;
                 }
             });
         }
         self.clients.is_empty()
+    }
+
+    /// Broadcast a text message to all clients (or all except one).
+    fn broadcast_text(&self, message: &str, exclude_client: Option<ActorId>) {
+        for (id, client) in &self.clients {
+            if exclude_client.map_or(true, |exc| *id != exc) {
+                let msg = message.to_string();
+                let c = client.clone();
+                tokio::spawn(async move { let _ = c.tell(SendText(msg)).send().await; });
+            }
+        }
     }
     fn schedule_shutdown(actor: ActorRef<Self>, _doc_id: Arc<str>) {
         tokio::spawn(async move { sleep(WS_TOLERANCE).await; let _ = actor.tell(IdleShutdown).send().await; });
@@ -158,7 +171,24 @@ impl Message<ConnectClient> for DocActor {
         ctx.actor_ref().link(&msg.client).await;
         let client_id = msg.client.id();
         self.clients.insert(client_id, msg.client);
-        self.contexts.insert(client_id, msg.context);
+        self.contexts.insert(client_id, msg.context.clone());
+
+        // Notify hooks about peer joining
+        let peer_count = self.clients.len();
+        let doc_id = Arc::clone(&self.doc_id);
+        let hooks = Arc::clone(&self.hooks);
+        let context = msg.context;
+        tokio::spawn(async move {
+            for hook in hooks.iter() {
+                let _ = hook.on_peer_joined(OnPeerJoinedPayload {
+                    doc_id: &doc_id,
+                    client_id,
+                    context: &context,
+                    peer_count,
+                }).await;
+            }
+        });
+
         self.protocol.start::<EncoderV1>(&self.awareness).await.map(|msgs| msgs.into_iter().map(|m| m.encode_v1()).collect()).unwrap_or_default()
     }
 }
@@ -225,5 +255,22 @@ impl Message<ApplyUpdate> for DocActor {
             let c = client.clone();
             tokio::spawn(async move { let _ = c.tell(WirePayload(w)).send().await; });
         }
+    }
+}
+
+impl Message<BroadcastText> for DocActor {
+    type Reply = ();
+    async fn handle(&mut self, msg: BroadcastText, _: &mut KameoContext<Self, Self::Reply>) {
+        self.broadcast_text(&msg.message, msg.exclude_client);
+    }
+}
+
+/// Get the number of connected clients.
+pub struct GetPeerCount;
+
+impl Message<GetPeerCount> for DocActor {
+    type Reply = usize;
+    async fn handle(&mut self, _: GetPeerCount, _: &mut KameoContext<Self, Self::Reply>) -> Self::Reply {
+        self.clients.len()
     }
 }
