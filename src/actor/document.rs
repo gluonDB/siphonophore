@@ -25,6 +25,7 @@ use crate::payload::encode_with_doc_id;
 
 const MSG_SYNC: u8 = 0;
 const MSG_AWARENESS: u8 = 1;
+const SYNC_STEP2: u8 = 1;
 const SYNC_UPDATE: u8 = 2;
 const WS_TOLERANCE: Duration = Duration::from_secs(10);
 
@@ -203,8 +204,25 @@ impl Message<YjsData> for DocActor {
                 }
             }
         }
-        
-        if Self::should_broadcast(data) { self.broadcast(msg.client_id, data); }
+        if Self::should_broadcast(data) {
+            self.broadcast(msg.client_id, data);
+        }
+
+        // Broadcast updates contained in SyncStep2 messages to other clients.
+        // SyncStep2 is point-to-point in the Y-sync protocol, but a relay server
+        // must forward the update so peers that already completed their handshake
+        // (and thus won't receive the data via their own SyncStep2 exchange) still
+        // get the new state. Re-encode as SYNC_UPDATE which clients expect for
+        // incremental updates.
+        if data.len() > 2
+            && data[0] == MSG_SYNC
+            && data[1] == SYNC_STEP2
+            && self.clients.len() > 1
+        {
+            let mut retagged = data.to_vec();
+            retagged[1] = SYNC_UPDATE;
+            self.broadcast(msg.client_id, &retagged);
+        }
     }
 }
 
