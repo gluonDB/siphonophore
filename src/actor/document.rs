@@ -50,7 +50,7 @@ impl DocActor {
     fn handle_client_left(&mut self, client_id: ActorId) -> bool {
         if let Some(awareness_id) = self.client_awareness_ids.remove(&client_id) { self.awareness.remove_state(awareness_id); }
         self.clients.remove(&client_id);
-        
+
         if let Some(context) = self.contexts.remove(&client_id) {
             let doc_id = Arc::clone(&self.doc_id);
             let hooks = Arc::clone(&self.hooks);
@@ -96,7 +96,7 @@ impl DocActor {
 impl Actor for DocActor {
     type Args = DocActorArgs;
     type Error = Infallible;
-    
+
     async fn on_start(args: Self::Args, _: ActorRef<Self>) -> Result<Self, Self::Error> {
         let doc = Doc::new();
         for hook in args.hooks.iter() {
@@ -176,15 +176,27 @@ impl Message<YjsData> for DocActor {
     type Reply = ();
     async fn handle(&mut self, msg: YjsData, _: &mut KameoContext<Self, Self::Reply>) {
         let data = &msg.data[..];
-        let responses = match self.protocol.handle(&self.awareness, data).await { Ok(r) => r, Err(_) => return };
-        
+
+        // Capture state vector before applying, so we can detect whether a
+        // SyncStep2 actually introduced new state worth broadcasting.
+        let sv_before = if data.len() > 2 && data[0] == MSG_SYNC && data[1] == SYNC_STEP2 {
+            Some(self.doc.transact().state_vector())
+        } else {
+            None
+        };
+
+        let responses = match self.protocol.handle(&self.awareness, data).await {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
         if let Some(client) = self.clients.get(&msg.client_id) {
             for resp in responses {
                 let wire = encode_with_doc_id(&self.doc_id, &resp.encode_v1());
                 let _ = client.tell(WirePayload(wire)).send().await;
             }
         }
-        
+
         if Self::is_doc_change(data) {
             self.dirty = true;
             if let Some(context) = self.contexts.get(&msg.client_id) {
@@ -193,7 +205,7 @@ impl Message<YjsData> for DocActor {
                 }
             }
         }
-        
+
         if !self.client_awareness_ids.contains_key(&msg.client_id) {
             for m in Self::decode_messages(data) {
                 if let YMessage::Awareness(update) = m {
@@ -208,20 +220,13 @@ impl Message<YjsData> for DocActor {
             self.broadcast(msg.client_id, data);
         }
 
-        // Broadcast updates contained in SyncStep2 messages to other clients.
-        // SyncStep2 is point-to-point in the Y-sync protocol, but a relay server
-        // must forward the update so peers that already completed their handshake
-        // (and thus won't receive the data via their own SyncStep2 exchange) still
-        // get the new state. Re-encode as SYNC_UPDATE which clients expect for
-        // incremental updates.
-        if data.len() > 2
-            && data[0] == MSG_SYNC
-            && data[1] == SYNC_STEP2
-            && self.clients.len() > 1
-        {
-            let mut retagged = data.to_vec();
-            retagged[1] = SYNC_UPDATE;
-            self.broadcast(msg.client_id, &retagged);
+        // Broadcast updates contained in SyncStep2 messages to other clients—but only when the SyncStep2 actually introduced new state
+        if let Some(sv) = sv_before {
+            if self.clients.len() > 1 && sv != self.doc.transact().state_vector() {
+                let mut retagged = data.to_vec();
+                retagged[1] = SYNC_UPDATE;
+                self.broadcast(msg.client_id, &retagged);
+            }
         }
     }
 }
