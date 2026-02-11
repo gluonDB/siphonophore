@@ -5,13 +5,7 @@ use kameo::{
 };
 use tokio::time::{sleep, Duration};
 use yrs::{
-    Doc, ReadTxn, StateVector, Transact, Update,
-    sync::{Awareness, Message as YMessage},
-    updates::encoder::{Encode, Encoder, EncoderV1},
-    updates::decoder::{Decode, DecoderV1},
-    sync::protocol::{DefaultProtocol, AsyncProtocol, MessageReader},
-    encoding::read::Cursor,
-    encoding::write::Write,
+    Doc, ReadTxn, StateVector, Transact, Update, encoding::{read::Cursor, write::Write}, sync::{Awareness, Message as YMessage, SyncMessage, protocol::{AsyncProtocol, DefaultProtocol, MessageReader}}, updates::{decoder::{Decode, DecoderV1}, encoder::{Encode, Encoder, EncoderV1}}
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -103,12 +97,28 @@ impl DocActor {
         while let Some(Ok(m)) = reader.next() { msgs.push(m); }
         msgs
     }
+
+    /// Extract raw Y-CRDT update bytes from a Y-sync protocol message.
+    ///
+    /// SyncStep2 and SyncUpdate messages wrap a Y-CRDT update inside protocol
+    /// framing.  This helper strips the framing so hook consumers receive a
+    /// plain update that can be decoded with `Update::decode_v1`.
+    fn extract_update_bytes(data: &[u8]) -> Option<Vec<u8>> {
+        for msg in Self::decode_messages(data) {
+            match msg {
+                YMessage::Sync(SyncMessage::SyncStep2(update))
+                | YMessage::Sync(SyncMessage::Update(update)) => return Some(update),
+                _ => {}
+            }
+        }
+        None
+    }
 }
 
 impl Actor for DocActor {
     type Args = DocActorArgs;
     type Error = Infallible;
-    
+
     async fn on_start(args: Self::Args, _: ActorRef<Self>) -> Result<Self, Self::Error> {
         let doc = Doc::new();
         for hook in args.hooks.iter() {
@@ -206,23 +216,25 @@ impl Message<YjsData> for DocActor {
     async fn handle(&mut self, msg: YjsData, _: &mut KameoContext<Self, Self::Reply>) {
         let data = &msg.data[..];
         let responses = match self.protocol.handle(&self.awareness, data).await { Ok(r) => r, Err(_) => return };
-        
+
         if let Some(client) = self.clients.get(&msg.client_id) {
             for resp in responses {
                 let wire = encode_with_doc_id(&self.doc_id, &resp.encode_v1());
                 let _ = client.tell(WirePayload(wire)).send().await;
             }
         }
-        
+
         if Self::is_doc_change(data) {
             self.dirty = true;
+            let update_bytes = Self::extract_update_bytes(data);
+            let hook_data = update_bytes.as_deref().unwrap_or(data);
             if let Some(context) = self.contexts.get(&msg.client_id) {
                 for hook in self.hooks.iter() {
-                    let _ = hook.on_change(OnChangePayload { doc_id: &self.doc_id, client_id: msg.client_id, update: data, context }).await;
+                    let _ = hook.on_change(OnChangePayload { doc_id: &self.doc_id, client_id: msg.client_id, update: hook_data, context }).await;
                 }
             }
         }
-        
+
         if !self.client_awareness_ids.contains_key(&msg.client_id) {
             for m in Self::decode_messages(data) {
                 if let YMessage::Awareness(update) = m {
@@ -233,7 +245,7 @@ impl Message<YjsData> for DocActor {
                 }
             }
         }
-        
+
         if Self::should_broadcast(data) { self.broadcast(msg.client_id, data); }
     }
 }
