@@ -6,7 +6,7 @@ use kameo::{
 use tokio::time::{sleep, Duration};
 use yrs::{
     Doc, ReadTxn, StateVector, Transact, Update,
-    sync::{Awareness, Message as YMessage},
+    sync::{Awareness, Message as YMessage, SyncMessage},
     updates::encoder::{Encode, Encoder, EncoderV1},
     updates::decoder::{Decode, DecoderV1},
     sync::protocol::{DefaultProtocol, AsyncProtocol, MessageReader},
@@ -90,6 +90,28 @@ impl DocActor {
         let mut msgs = Vec::new();
         while let Some(Ok(m)) = reader.next() { msgs.push(m); }
         msgs
+    }
+
+    /// Extract raw Y-CRDT update bytes from a SyncStep2 or SyncUpdate message
+    fn extract_update_bytes(data: &[u8]) -> Option<Vec<u8>> {
+        for msg in Self::decode_messages(data) {
+            match msg {
+                YMessage::Sync(SyncMessage::SyncStep2(update))
+                | YMessage::Sync(SyncMessage::Update(update)) => return Some(update),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    ///Re-encode a SyncStep2 message as a SyncUpdate extracting the update
+    fn syncstep2_as_update(data: &[u8]) -> Option<Vec<u8>> {
+        let update = Self::extract_update_bytes(data)?;
+        let mut encoder = EncoderV1::new();
+        encoder.write_var(MSG_SYNC as u32);
+        encoder.write_var(SYNC_UPDATE as u32);
+        encoder.write_buf(&update);
+        Some(encoder.to_vec())
     }
 }
 
@@ -223,9 +245,9 @@ impl Message<YjsData> for DocActor {
         // Broadcast updates contained in SyncStep2 messages to other clients—but only when the SyncStep2 actually introduced new state
         if let Some(sv) = sv_before {
             if self.clients.len() > 1 && sv != self.doc.transact().state_vector() {
-                let mut retagged = data.to_vec();
-                retagged[1] = SYNC_UPDATE;
-                self.broadcast(msg.client_id, &retagged);
+                if let Some(update_msg) = Self::syncstep2_as_update(data) {
+                    self.broadcast(msg.client_id, &update_msg);
+                }
             }
         }
     }
@@ -248,5 +270,56 @@ impl Message<ApplyUpdate> for DocActor {
             let c = client.clone();
             tokio::spawn(async move { let _ = c.tell(WirePayload(w)).send().await; });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syncstep2_as_update_matches_encoder_output() {
+        let fake_update = &[10, 20, 30, 40, 50];
+
+        let mut step2_enc = EncoderV1::new();
+        step2_enc.write_var(MSG_SYNC as u32);
+        step2_enc.write_var(SYNC_STEP2 as u32);
+        step2_enc.write_buf(fake_update);
+        let syncstep2_msg = step2_enc.to_vec();
+
+        let mut expected_enc = EncoderV1::new();
+        expected_enc.write_var(MSG_SYNC as u32);
+        expected_enc.write_var(SYNC_UPDATE as u32);
+        expected_enc.write_buf(fake_update);
+        let expected = expected_enc.to_vec();
+
+        let result = DocActor::syncstep2_as_update(&syncstep2_msg).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn syncstep2_as_update_preserves_large_payload() {
+        let big_update: Vec<u8> = (0..=255).cycle().take(4096).collect();
+
+        let mut step2_enc = EncoderV1::new();
+        step2_enc.write_var(MSG_SYNC as u32);
+        step2_enc.write_var(SYNC_STEP2 as u32);
+        step2_enc.write_buf(&big_update);
+        let syncstep2_msg = step2_enc.to_vec();
+
+        let mut expected_enc = EncoderV1::new();
+        expected_enc.write_var(MSG_SYNC as u32);
+        expected_enc.write_var(SYNC_UPDATE as u32);
+        expected_enc.write_buf(&big_update);
+        let expected = expected_enc.to_vec();
+
+        let result = DocActor::syncstep2_as_update(&syncstep2_msg).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn syncstep2_as_update_returns_none_for_non_sync() {
+        let awareness_data = &[MSG_AWARENESS, 0, 0];
+        assert!(DocActor::syncstep2_as_update(awareness_data).is_none());
     }
 }
