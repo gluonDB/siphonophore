@@ -1,6 +1,6 @@
 # Siphonophore
 
-Extensible Yjs sync server primitive in ~900 lines of code.
+Extensible Yjs sync server primitive.
 
 This aims to be an alternative to [Hocuspocus](https://github.com/ueberdosis/hocuspocus), but with native document multiplexing in a single WebSocket connection. 
 
@@ -11,6 +11,12 @@ This aims to be an alternative to [Hocuspocus](https://github.com/ueberdosis/hoc
 - **Actor Model**: Built with the awesome libraries of [Kameo](https://github.com/tqwewe/kameo) and [Yrs](https://github.com/y-crdt/y-crdt)
 - **Axum Integration**: Compose with your existing HTTP routes
 - **Dead simple multiplexing protocol**: Can be used in any YJS compatible client, with minimal effort.
+
+
+## Projects Using Siphonophore
+
+<a href="https://gluondb.com"><img src="https://avatars.githubusercontent.com/u/235569532?v=4" width="40"></a> &nbsp; <a href="https://diaryx.org"><img src="https://avatars.githubusercontent.com/u/243425743?v=4" width="40"></a>
+
 
 ## Quick Start
 
