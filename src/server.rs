@@ -4,8 +4,9 @@ use std::io;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::actor::{Root, CreateClient, PersistDocument, ApplyServerUpdate};
+use crate::actor::{Root, CreateClient, PersistDocument, ApplyServerUpdate, BroadcastText, GetDocPeerCount};
 use crate::hooks::{Hook, RequestInfo};
+use kameo::actor::ActorId;
 
 /// Siphonophore sync server
 /// 
@@ -52,6 +53,25 @@ impl Handle {
     pub async fn apply_update(&self, doc_id: &str, update: Vec<u8>) -> bool {
         let doc_id: Arc<str> = doc_id.into();
         self.root.ask(ApplyServerUpdate { doc_id, update }).send().await.unwrap_or(false)
+    }
+
+    /// Broadcast a text message to all clients connected to a document.
+    ///
+    /// Use this for sending control messages like peer events, focus changes, etc.
+    ///
+    /// # Arguments
+    /// * `doc_id` - The document ID
+    /// * `message` - The text message to broadcast (usually JSON)
+    /// * `exclude_client` - Optional client to exclude from the broadcast
+    pub async fn broadcast_text(&self, doc_id: &str, message: String, exclude_client: Option<ActorId>) -> bool {
+        let doc_id: Arc<str> = doc_id.into();
+        self.root.ask(BroadcastText { doc_id, message, exclude_client }).send().await.unwrap_or(false)
+    }
+
+    /// Get the number of peers connected to a document.
+    pub async fn get_peer_count(&self, doc_id: &str) -> usize {
+        let doc_id: Arc<str> = doc_id.into();
+        self.root.ask(GetDocPeerCount(doc_id)).send().await.unwrap_or(0)
     }
 }
 
