@@ -167,8 +167,6 @@ pub trait Hook: Send + Sync {
     async fn on_authenticate(&self, _payload: OnAuthenticatePayload<'_>) -> HookResult { Ok(()) }
 
     /// Called after authentication but before y-sync begins.
-    ///
-    /// The `sender` channel allows sending text messages during the handshake.
     async fn on_before_sync(&self, _payload: OnBeforeSyncPayload<'_>) -> Result<BeforeSyncAction, HookError> {
         Ok(BeforeSyncAction::Continue)
     }
