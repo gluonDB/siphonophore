@@ -1,2 +1,7 @@
 /target
 Cargo.lock
+
+.gitignore
+/app_test
+/client-js/node_modules
+/client-js/dist
