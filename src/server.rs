@@ -4,7 +4,7 @@ use std::io;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::actor::{Root, CreateClient, PersistDocument, ApplyServerUpdate};
+use crate::actor::{Root, CreateClient, PersistDocument, ApplyServerUpdate, GetServerDoc};
 use crate::hooks::{Hook, RequestInfo};
 
 /// Siphonophore sync server
@@ -53,6 +53,13 @@ impl Handle {
         let doc_id: Arc<str> = doc_id.into();
         self.root.ask(ApplyServerUpdate { doc_id, update }).send().await.unwrap_or(false)
     }
+
+    /// Get a clone of the Y-CRDT Doc for a document, loading it if necessary.
+    /// The returned Doc shares state with the actor's copy via Arc.
+    pub async fn get_doc(&self, doc_id: &str) -> Option<yrs::Doc> {
+        let doc_id: Arc<str> = doc_id.into();
+        self.root.ask(GetServerDoc(doc_id)).send().await.ok().map(|h| h.0)
+    }
 }
 
 impl Server {
@@ -66,14 +73,13 @@ impl Server {
         Self { root }
     }
 
-    pub async fn persist_document(&self, doc_id: &str) {
-        let doc_id: Arc<str> = doc_id.into();
-        let _ = self.root.ask(PersistDocument(doc_id)).send().await;
-    }
-
     /// Get a handle for use in other HTTP handlers
     pub fn handle(&self) -> Handle {
         Handle { root: self.root.clone() }
+    }
+
+    pub async fn persist_document(&self, doc_id: &str) {
+        self.handle().persist_document(doc_id).await;
     }
 
     /// Get router with WebSocket endpoint at `/ws`

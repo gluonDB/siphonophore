@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use kameo::actor::ActorId;
+use yrs::Doc;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::error::Error;
@@ -63,6 +64,7 @@ pub struct OnChangePayload<'a> {
     pub doc_id: &'a str,
     pub client_id: ActorId,
     pub update: &'a [u8],
+    pub doc: &'a Doc,
     pub context: &'a Context,
 }
 
@@ -75,11 +77,13 @@ pub struct OnDisconnectPayload<'a> {
 pub struct OnSavePayload<'a> {
     pub doc_id: &'a str,
     pub state: &'a [u8],
+    pub doc: &'a Doc,
 }
 
 pub struct BeforeCloseDirtyPayload<'a> {
     pub doc_id: &'a str,
     pub state: &'a [u8],
+    pub doc: &'a Doc,
 }
 
 // ============================================================================

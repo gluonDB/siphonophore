@@ -8,6 +8,7 @@ use kameo::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use yrs::Doc;
 use std::ops::ControlFlow;
 use std::future::Future;
 
@@ -46,7 +47,7 @@ impl Actor for Root {
     }
 }
 
-use crate::actor::messages::{CreateClient, RequestDoc, PersistDocument, PersistNow, ApplyServerUpdate};
+use crate::actor::messages::{CreateClient, RequestDoc, PersistDocument, PersistNow, ApplyServerUpdate, GetDocClone, GetServerDoc, DocHandle};
 use crate::actor::document::{ApplyUpdate, DocActorArgs};
 use crate::actor::client::ClientActorArgs;
 
@@ -87,5 +88,19 @@ impl Message<ApplyServerUpdate> for Root {
         if let Some(doc) = self.active_docs.get(&msg.doc_id) {
             doc.tell(ApplyUpdate(msg.update)).send().await.is_ok()
         } else { false }
+    }
+}
+
+impl Message<GetServerDoc> for Root {
+    type Reply = DocHandle;
+    async fn handle(&mut self, GetServerDoc(doc_id): GetServerDoc, ctx: &mut Context<Self, Self::Reply>) -> DocHandle {
+        let doc_actor = if let Some(doc) = self.active_docs.get(&doc_id) {
+            doc.clone()
+        } else {
+            let doc = DocActor::spawn_link(ctx.actor_ref(), DocActorArgs { doc_id: Arc::clone(&doc_id), hooks: Arc::clone(&self.hooks) }).await;
+            self.active_docs.insert(doc_id, doc.clone());
+            doc
+        };
+        doc_actor.ask(GetDocClone).send().await.unwrap_or_else(|_| DocHandle(Doc::new()))
     }
 }

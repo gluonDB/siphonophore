@@ -20,7 +20,7 @@ use std::future::Future;
 
 use crate::hooks::{Hook, Context, OnLoadDocumentPayload, OnChangePayload, OnDisconnectPayload, OnSavePayload, BeforeCloseDirtyPayload};
 use crate::actor::client::ClientActor;
-use crate::actor::messages::{IdleShutdown, YjsData, ConnectClient, DisconnectClient, WirePayload, PersistNow};
+use crate::actor::messages::{IdleShutdown, YjsData, ConnectClient, DisconnectClient, WirePayload, PersistNow, GetDocClone, DocHandle};
 use crate::payload::encode_with_doc_id;
 
 const MSG_SYNC: u8 = 0;
@@ -157,7 +157,7 @@ impl Message<IdleShutdown> for DocActor {
         if self.dirty {
             let state = self.doc.transact().encode_state_as_update_v1(&StateVector::default());
             for hook in self.hooks.iter() {
-                let _ = hook.before_close_dirty(BeforeCloseDirtyPayload { doc_id: &self.doc_id, state: &state }).await;
+                let _ = hook.before_close_dirty(BeforeCloseDirtyPayload { doc_id: &self.doc_id, state: &state, doc: &self.doc }).await;
             }
         }
         ctx.actor_ref().kill();
@@ -169,7 +169,7 @@ impl Message<PersistNow> for DocActor {
     async fn handle(&mut self, _: PersistNow, _: &mut KameoContext<Self, Self::Reply>) {
         let state = self.doc.transact().encode_state_as_update_v1(&StateVector::default());
         for hook in self.hooks.iter() {
-            if hook.on_save(OnSavePayload { doc_id: &self.doc_id, state: &state }).await.is_err() { return; }
+            if hook.on_save(OnSavePayload { doc_id: &self.doc_id, state: &state, doc: &self.doc }).await.is_err() { return; }
         }
         self.dirty = false;
     }
@@ -223,7 +223,7 @@ impl Message<YjsData> for DocActor {
             self.dirty = true;
             if let Some(context) = self.contexts.get(&msg.client_id) {
                 for hook in self.hooks.iter() {
-                    let _ = hook.on_change(OnChangePayload { doc_id: &self.doc_id, client_id: msg.client_id, update: data, context }).await;
+                    let _ = hook.on_change(OnChangePayload { doc_id: &self.doc_id, client_id: msg.client_id, update: data, doc: &self.doc, context }).await;
                 }
             }
         }
@@ -250,6 +250,13 @@ impl Message<YjsData> for DocActor {
                 }
             }
         }
+    }
+}
+
+impl Message<GetDocClone> for DocActor {
+    type Reply = DocHandle;
+    async fn handle(&mut self, _: GetDocClone, _: &mut KameoContext<Self, Self::Reply>) -> DocHandle {
+        DocHandle(self.doc.clone())
     }
 }
 

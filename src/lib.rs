@@ -92,4 +92,12 @@ pub use hooks::{
 };
 
 pub use axum;
+pub use yrs;
 pub use async_trait::async_trait;
+
+/// Encode a `yrs::Doc` as a full state update (v1).
+/// Convenience wrapper around `doc.transact().encode_state_as_update_v1(...)`.
+pub fn encode_doc_state(doc: &yrs::Doc) -> Vec<u8> {
+    use yrs::{ReadTxn, Transact};
+    doc.transact().encode_state_as_update_v1(&yrs::StateVector::default())
+}
