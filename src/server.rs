@@ -4,7 +4,7 @@ use std::io;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::actor::{Root, CreateClient, PersistDocument, ApplyServerUpdate, GetServerDoc};
+use crate::actor::{Root, CreateClient, PersistDocument, ApplyServerUpdate, GetServerDoc, GetDocIfLoaded};
 use crate::hooks::{Hook, RequestInfo};
 
 /// Siphonophore sync server
@@ -59,6 +59,13 @@ impl Handle {
     pub async fn get_doc(&self, doc_id: &str) -> Option<yrs::Doc> {
         let doc_id: Arc<str> = doc_id.into();
         self.root.ask(GetServerDoc(doc_id)).send().await.ok().map(|h| h.0)
+    }
+
+    /// Get a clone of the Y-CRDT Doc only if the document is already loaded.
+    /// Returns `None` without spawning a DocActor when the doc isn't active.
+    pub async fn get_doc_if_loaded(&self, doc_id: &str) -> Option<yrs::Doc> {
+        let doc_id: Arc<str> = doc_id.into();
+        self.root.ask(GetDocIfLoaded(doc_id)).send().await.ok().flatten().map(|h| h.0)
     }
 }
 

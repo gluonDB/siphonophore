@@ -4,4 +4,4 @@ mod client;
 pub(crate) mod messages;
 
 pub(crate) use root::Root;
-pub(crate) use messages::{CreateClient, PersistDocument, ApplyServerUpdate, GetServerDoc};
+pub(crate) use messages::{CreateClient, PersistDocument, ApplyServerUpdate, GetServerDoc, GetDocIfLoaded};

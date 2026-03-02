@@ -44,6 +44,8 @@ pub struct GetDocClone;
 
 pub struct GetServerDoc(pub Arc<str>);
 
+pub struct GetDocIfLoaded(pub Arc<str>);
+
 /// Newtype wrapper around `yrs::Doc` that implements kameo's `Reply` trait.
 pub struct DocHandle(pub Doc);
 

@@ -47,7 +47,7 @@ impl Actor for Root {
     }
 }
 
-use crate::actor::messages::{CreateClient, RequestDoc, PersistDocument, PersistNow, ApplyServerUpdate, GetDocClone, GetServerDoc, DocHandle};
+use crate::actor::messages::{CreateClient, RequestDoc, PersistDocument, PersistNow, ApplyServerUpdate, GetDocClone, GetServerDoc, GetDocIfLoaded, DocHandle};
 use crate::actor::document::{ApplyUpdate, DocActorArgs};
 use crate::actor::client::ClientActorArgs;
 
@@ -88,6 +88,14 @@ impl Message<ApplyServerUpdate> for Root {
         if let Some(doc) = self.active_docs.get(&msg.doc_id) {
             doc.tell(ApplyUpdate(msg.update)).send().await.is_ok()
         } else { false }
+    }
+}
+
+impl Message<GetDocIfLoaded> for Root {
+    type Reply = Option<DocHandle>;
+    async fn handle(&mut self, GetDocIfLoaded(doc_id): GetDocIfLoaded, _: &mut Context<Self, Self::Reply>) -> Option<DocHandle> {
+        let doc = self.active_docs.get(&doc_id)?;
+        doc.ask(GetDocClone).send().await.ok()
     }
 }
 
