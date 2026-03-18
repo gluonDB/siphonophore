@@ -1,5 +1,8 @@
 # Siphonophore
-[![sloprank](sloprank.io/badge/gluondb/siphonophore.svg)](sloprank.io/repo/gluondb/siphonophore)
+
+
+[![sloprank](https://sloprank.io/badge/gluondb/siphonophore.svg)](https://sloprank.io/repo/gluondb/siphonophore)
+
 Extensible Yjs sync server primitive.
 
 This aims to be an alternative to [Hocuspocus](https://github.com/ueberdosis/hocuspocus), but with native document multiplexing in a single WebSocket connection. 
