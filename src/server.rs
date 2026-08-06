@@ -1,25 +1,34 @@
-use axum::{Router, routing::get, extract::{ws::WebSocketUpgrade, State, Query}, response::Response, http::HeaderMap};
+use axum::{
+    extract::{ws::WebSocketUpgrade, Query, State},
+    http::HeaderMap,
+    response::Response,
+    routing::get,
+    Router,
+};
 use kameo::actor::{ActorRef, Spawn};
-use std::io;
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 
-use crate::actor::{Root, CreateClient, PersistDocument, ApplyServerUpdate, GetServerDoc, GetDocIfLoaded};
+use crate::actor::{
+    ApplyServerUpdate, CreateClient, GetDocIfLoaded, GetServerDoc, PersistDocument, Root,
+    UnloadDocument,
+};
 use crate::hooks::{Hook, RequestInfo};
 
 /// Siphonophore sync server
-/// 
+///
 /// # Flexible mounting
 /// ```no_run
 /// use siphonophore::Server;
 /// use axum::Router;
-/// 
+///
 /// // Option 1: Default router with /ws
 /// let app = Server::new().into_router();
-/// 
+///
 /// // Option 2: Custom path
 /// let app = Server::new().into_router_at("/sync/ws");
-/// 
+///
 /// // Option 3: Compose with other routes
 /// let server = Server::new();
 /// let handle = server.handle();
@@ -51,21 +60,51 @@ impl Handle {
     /// Apply a Yjs update to a document if it's loaded. Returns true if applied.
     pub async fn apply_update(&self, doc_id: &str, update: Vec<u8>) -> bool {
         let doc_id: Arc<str> = doc_id.into();
-        self.root.ask(ApplyServerUpdate { doc_id, update }).send().await.unwrap_or(false)
+        self.root
+            .ask(ApplyServerUpdate { doc_id, update })
+            .send()
+            .await
+            .unwrap_or(false)
     }
 
     /// Get a clone of the Y-CRDT Doc for a document, loading it if necessary.
     /// The returned Doc shares state with the actor's copy via Arc.
     pub async fn get_doc(&self, doc_id: &str) -> Option<yrs::Doc> {
         let doc_id: Arc<str> = doc_id.into();
-        self.root.ask(GetServerDoc(doc_id)).send().await.ok().map(|h| h.0)
+        self.root
+            .ask(GetServerDoc(doc_id))
+            .send()
+            .await
+            .ok()
+            .map(|h| h.0)
     }
 
     /// Get a clone of the Y-CRDT Doc only if the document is already loaded.
     /// Returns `None` without spawning a DocActor when the doc isn't active.
     pub async fn get_doc_if_loaded(&self, doc_id: &str) -> Option<yrs::Doc> {
         let doc_id: Arc<str> = doc_id.into();
-        self.root.ask(GetDocIfLoaded(doc_id)).send().await.ok().flatten().map(|h| h.0)
+        self.root
+            .ask(GetDocIfLoaded(doc_id))
+            .send()
+            .await
+            .ok()
+            .flatten()
+            .map(|h| h.0)
+    }
+
+    /// Unload a document if it is active, invalidating its in-memory incarnation.
+    ///
+    /// Connected clients receive a `DocumentUnloaded` protocol error and must
+    /// re-join to obtain the new incarnation. Unsaved changes are discarded
+    /// without running `on_save` or `before_close_dirty`; call
+    /// [`Handle::persist_document`] first if the in-memory state still matters.
+    pub async fn unload_document(&self, doc_id: &str) -> bool {
+        let doc_id: Arc<str> = doc_id.into();
+        self.root
+            .ask(UnloadDocument(doc_id))
+            .send()
+            .await
+            .unwrap_or(false)
     }
 }
 
@@ -82,7 +121,9 @@ impl Server {
 
     /// Get a handle for use in other HTTP handlers
     pub fn handle(&self) -> Handle {
-        Handle { root: self.root.clone() }
+        Handle {
+            root: self.root.clone(),
+        }
     }
 
     pub async fn persist_document(&self, doc_id: &str) {
@@ -109,7 +150,11 @@ impl Server {
     }
 }
 
-impl Default for Server { fn default() -> Self { Self::new() } }
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -119,11 +164,21 @@ async fn ws_handler(
 ) -> Response {
     let headers_map: HashMap<String, String> = headers
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_lowercase(), v.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|v| (k.as_str().to_lowercase(), v.to_string()))
+        })
         .collect();
     let request_info = RequestInfo::new(headers_map, query_params);
-    
+
     ws.on_upgrade(move |socket| async move {
-        let _ = root.ask(CreateClient { socket, request_info }).send().await;
+        let _ = root
+            .ask(CreateClient {
+                socket,
+                request_info,
+            })
+            .send()
+            .await;
     })
 }

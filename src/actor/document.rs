@@ -1,36 +1,48 @@
 use kameo::{
-    actor::{Actor, ActorRef, WeakActorRef, ActorId},
+    actor::{Actor, ActorId, ActorRef, WeakActorRef},
     error::{ActorStopReason, Infallible},
     message::{Context as KameoContext, Message},
 };
+use std::collections::HashMap;
+use std::future::Future;
+use std::ops::ControlFlow;
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
+use uuid::Uuid;
 use yrs::{
-    Doc, ReadTxn, StateVector, Transact, Update,
-    sync::{Awareness, Message as YMessage, SyncMessage},
-    updates::encoder::{Encode, Encoder, EncoderV1},
-    updates::decoder::{Decode, DecoderV1},
-    sync::protocol::{DefaultProtocol, AsyncProtocol, MessageReader},
     encoding::read::Cursor,
     encoding::write::Write,
+    sync::protocol::{AsyncProtocol, DefaultProtocol, MessageReader},
+    sync::{Awareness, Message as YMessage, SyncMessage},
+    updates::decoder::{Decode, DecoderV1},
+    updates::encoder::{Encode, Encoder, EncoderV1},
+    Doc, ReadTxn, StateVector, Transact, Update,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::ops::ControlFlow;
-use std::future::Future;
 
-use crate::hooks::{Hook, Context, OnLoadDocumentPayload, OnChangePayload, OnDisconnectPayload, OnSavePayload, BeforeCloseDirtyPayload};
 use crate::actor::client::ClientActor;
-use crate::actor::messages::{IdleShutdown, YjsData, ConnectClient, DisconnectClient, WirePayload, PersistNow, GetDocClone, DocHandle};
+use crate::actor::messages::{
+    ConnectClient, DisconnectClient, DocHandle, GetDocClone, GetIncarnation, IdleShutdown,
+    PersistNow, UnloadNow, WirePayload, YjsData,
+};
+use crate::hooks::{
+    BeforeCloseDirtyPayload, Context, Hook, OnChangePayload, OnDisconnectPayload,
+    OnLoadDocumentPayload, OnSavePayload,
+};
 use crate::payload::encode_with_doc_id;
 
 const MSG_SYNC: u8 = 0;
 const MSG_AWARENESS: u8 = 1;
+const MSG_INCARNATION: u8 = 2;
+const INC_ERROR: u8 = 3;
+const ERR_DOCUMENT_UNLOADED: u8 = 7;
 const SYNC_STEP2: u8 = 1;
 const SYNC_UPDATE: u8 = 2;
 const WS_TOLERANCE: Duration = Duration::from_secs(10);
 
 pub struct DocActor {
     doc_id: Arc<str>,
+    incarnation: Uuid,
+    load_error: bool,
     doc: Doc,
     awareness: Awareness,
     protocol: DefaultProtocol,
@@ -48,7 +60,9 @@ pub struct DocActorArgs {
 
 impl DocActor {
     fn handle_client_left(&mut self, client_id: ActorId) -> bool {
-        if let Some(awareness_id) = self.client_awareness_ids.remove(&client_id) { self.awareness.remove_state(awareness_id); }
+        if let Some(awareness_id) = self.client_awareness_ids.remove(&client_id) {
+            self.awareness.remove_state(awareness_id);
+        }
         self.clients.remove(&client_id);
 
         if let Some(context) = self.contexts.remove(&client_id) {
@@ -56,14 +70,25 @@ impl DocActor {
             let hooks = Arc::clone(&self.hooks);
             tokio::spawn(async move {
                 for hook in hooks.iter() {
-                    let _ = hook.on_disconnect(OnDisconnectPayload { doc_id: &doc_id, client_id, context: &context }).await;
+                    let _ = hook
+                        .on_disconnect(OnDisconnectPayload {
+                            doc_id: &doc_id,
+                            client_id,
+                            context: &context,
+                        })
+                        .await;
                 }
             });
         }
         self.clients.is_empty()
     }
-    fn schedule_shutdown(actor: ActorRef<Self>, _doc_id: Arc<str>) {
-        tokio::spawn(async move { sleep(WS_TOLERANCE).await; let _ = actor.tell(IdleShutdown).send().await; });
+    /// Ask the actor to shut down after the idle grace period. `IdleShutdown` is
+    /// a no-op while clients remain, so a concurrent joiner is never cut off.
+    pub(crate) fn schedule_shutdown(actor: ActorRef<Self>) {
+        tokio::spawn(async move {
+            sleep(WS_TOLERANCE).await;
+            let _ = actor.tell(IdleShutdown).send().await;
+        });
     }
     fn broadcast(&self, sender_id: ActorId, payload: &[u8]) {
         let wire = encode_with_doc_id(&self.doc_id, payload);
@@ -71,13 +96,16 @@ impl DocActor {
             if *id != sender_id {
                 let w = wire.clone();
                 let c = client.clone();
-                tokio::spawn(async move { let _ = c.tell(WirePayload(w)).send().await; });
+                tokio::spawn(async move {
+                    let _ = c.tell(WirePayload(w)).send().await;
+                });
             }
         }
     }
 
     fn should_broadcast(data: &[u8]) -> bool {
-        matches!(data.first(), Some(&MSG_AWARENESS)) || (data.first() == Some(&MSG_SYNC) && data.get(1) == Some(&SYNC_UPDATE))
+        matches!(data.first(), Some(&MSG_AWARENESS))
+            || (data.first() == Some(&MSG_SYNC) && data.get(1) == Some(&SYNC_UPDATE))
     }
 
     fn is_doc_change(data: &[u8]) -> bool {
@@ -88,7 +116,9 @@ impl DocActor {
         let mut decoder = DecoderV1::new(Cursor::new(data));
         let mut reader = MessageReader::new(&mut decoder);
         let mut msgs = Vec::new();
-        while let Some(Ok(m)) = reader.next() { msgs.push(m); }
+        while let Some(Ok(m)) = reader.next() {
+            msgs.push(m);
+        }
         msgs
     }
 
@@ -121,28 +151,58 @@ impl Actor for DocActor {
 
     async fn on_start(args: Self::Args, _: ActorRef<Self>) -> Result<Self, Self::Error> {
         let doc = Doc::new();
+        let mut load_error = false;
         for hook in args.hooks.iter() {
-            match hook.on_load_document(OnLoadDocumentPayload { doc_id: &args.doc_id }).await {
+            match hook
+                .on_load_document(OnLoadDocumentPayload {
+                    doc_id: &args.doc_id,
+                })
+                .await
+            {
                 Ok(Some(data)) => {
-                    if let Ok(update) = Update::decode_v1(&data) {
-                        let _ = doc.transact_mut().apply_update(update);
+                    match Update::decode_v1(&data) {
+                        Ok(update) => {
+                            if doc.transact_mut().apply_update(update).is_err() {
+                                load_error = true;
+                            }
+                        }
+                        Err(_) => load_error = true,
                     }
                     break;
                 }
                 Ok(None) => continue,
-                Err(_) => continue,
+                Err(_) => {
+                    load_error = true;
+                    break;
+                }
             }
         }
-        Ok(Self { doc_id: args.doc_id, awareness: Awareness::new(doc.clone()), doc, protocol: DefaultProtocol, clients: HashMap::new(), contexts: HashMap::new(), client_awareness_ids: HashMap::new(), dirty: false, hooks: args.hooks })
+        Ok(Self {
+            doc_id: args.doc_id,
+            incarnation: Uuid::new_v4(),
+            load_error,
+            awareness: Awareness::new(doc.clone()),
+            doc,
+            protocol: DefaultProtocol,
+            clients: HashMap::new(),
+            contexts: HashMap::new(),
+            client_awareness_ids: HashMap::new(),
+            dirty: false,
+            hooks: args.hooks,
+        })
     }
 
-    fn on_link_died(&mut self, actor_ref: WeakActorRef<Self>, id: ActorId, _: ActorStopReason) -> impl Future<Output = Result<ControlFlow<ActorStopReason>, Self::Error>> + Send {
+    fn on_link_died(
+        &mut self,
+        actor_ref: WeakActorRef<Self>,
+        id: ActorId,
+        _: ActorStopReason,
+    ) -> impl Future<Output = Result<ControlFlow<ActorStopReason>, Self::Error>> + Send {
         let should_shutdown = self.handle_client_left(id);
-        let doc_id = Arc::clone(&self.doc_id);
         async move {
             if should_shutdown {
                 if let Some(actor) = actor_ref.upgrade() {
-                    Self::schedule_shutdown(actor, doc_id);
+                    Self::schedule_shutdown(actor);
                 }
             }
             Ok(ControlFlow::Continue(()))
@@ -153,23 +213,78 @@ impl Actor for DocActor {
 impl Message<IdleShutdown> for DocActor {
     type Reply = ();
     async fn handle(&mut self, _: IdleShutdown, ctx: &mut KameoContext<Self, Self::Reply>) {
-        if !self.clients.is_empty() { return; }
+        if !self.clients.is_empty() {
+            return;
+        }
         if self.dirty {
-            let state = self.doc.transact().encode_state_as_update_v1(&StateVector::default());
+            let state = self
+                .doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
             for hook in self.hooks.iter() {
-                let _ = hook.before_close_dirty(BeforeCloseDirtyPayload { doc_id: &self.doc_id, state: &state, doc: &self.doc }).await;
+                if hook
+                    .before_close_dirty(BeforeCloseDirtyPayload {
+                        doc_id: &self.doc_id,
+                        state: &state,
+                        doc: &self.doc,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(doc_id = %self.doc_id, "dirty document close failed; scheduling retry");
+                    Self::schedule_shutdown(ctx.actor_ref().clone());
+                    return;
+                }
             }
         }
         ctx.actor_ref().kill();
     }
 }
 
+impl Message<UnloadNow> for DocActor {
+    type Reply = ();
+    async fn handle(&mut self, _: UnloadNow, ctx: &mut KameoContext<Self, Self::Reply>) {
+        let wire = encode_with_doc_id(
+            &self.doc_id,
+            &[MSG_INCARNATION, INC_ERROR, ERR_DOCUMENT_UNLOADED],
+        );
+        for client in self.clients.values() {
+            let _ = client.tell(WirePayload(wire.clone())).send().await;
+        }
+        ctx.actor_ref().kill();
+    }
+}
+
+impl Message<GetIncarnation> for DocActor {
+    type Reply = ([u8; 16], bool);
+    async fn handle(
+        &mut self,
+        _: GetIncarnation,
+        _: &mut KameoContext<Self, Self::Reply>,
+    ) -> Self::Reply {
+        (*self.incarnation.as_bytes(), self.load_error)
+    }
+}
+
 impl Message<PersistNow> for DocActor {
     type Reply = ();
     async fn handle(&mut self, _: PersistNow, _: &mut KameoContext<Self, Self::Reply>) {
-        let state = self.doc.transact().encode_state_as_update_v1(&StateVector::default());
+        let state = self
+            .doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         for hook in self.hooks.iter() {
-            if hook.on_save(OnSavePayload { doc_id: &self.doc_id, state: &state, doc: &self.doc }).await.is_err() { return; }
+            if hook
+                .on_save(OnSavePayload {
+                    doc_id: &self.doc_id,
+                    state: &state,
+                    doc: &self.doc,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
         self.dirty = false;
     }
@@ -177,20 +292,34 @@ impl Message<PersistNow> for DocActor {
 
 impl Message<ConnectClient> for DocActor {
     type Reply = Vec<Vec<u8>>;
-    async fn handle(&mut self, msg: ConnectClient, ctx: &mut KameoContext<Self, Self::Reply>) -> Self::Reply {
+    async fn handle(
+        &mut self,
+        msg: ConnectClient,
+        ctx: &mut KameoContext<Self, Self::Reply>,
+    ) -> Self::Reply {
         ctx.actor_ref().link(&msg.client).await;
         let client_id = msg.client.id();
         self.clients.insert(client_id, msg.client);
         self.contexts.insert(client_id, msg.context);
-        self.protocol.start::<EncoderV1>(&self.awareness).await.map(|msgs| msgs.into_iter().map(|m| m.encode_v1()).collect()).unwrap_or_default()
+        self.protocol
+            .start::<EncoderV1>(&self.awareness)
+            .await
+            .map(|msgs| msgs.into_iter().map(|m| m.encode_v1()).collect())
+            .unwrap_or_default()
     }
 }
 
 impl Message<DisconnectClient> for DocActor {
     type Reply = ();
-    async fn handle(&mut self, DisconnectClient(client): DisconnectClient, ctx: &mut KameoContext<Self, Self::Reply>) {
+    async fn handle(
+        &mut self,
+        DisconnectClient(client): DisconnectClient,
+        ctx: &mut KameoContext<Self, Self::Reply>,
+    ) {
         ctx.actor_ref().unlink(&client).await;
-        if self.handle_client_left(client.id()) { Self::schedule_shutdown(ctx.actor_ref().clone(), Arc::clone(&self.doc_id)); }
+        if self.handle_client_left(client.id()) {
+            Self::schedule_shutdown(ctx.actor_ref().clone());
+        }
     }
 }
 
@@ -223,7 +352,15 @@ impl Message<YjsData> for DocActor {
             self.dirty = true;
             if let Some(context) = self.contexts.get(&msg.client_id) {
                 for hook in self.hooks.iter() {
-                    let _ = hook.on_change(OnChangePayload { doc_id: &self.doc_id, client_id: msg.client_id, update: data, doc: &self.doc, context }).await;
+                    let _ = hook
+                        .on_change(OnChangePayload {
+                            doc_id: &self.doc_id,
+                            client_id: msg.client_id,
+                            update: data,
+                            doc: &self.doc,
+                            context,
+                        })
+                        .await;
                 }
             }
         }
@@ -255,7 +392,11 @@ impl Message<YjsData> for DocActor {
 
 impl Message<GetDocClone> for DocActor {
     type Reply = DocHandle;
-    async fn handle(&mut self, _: GetDocClone, _: &mut KameoContext<Self, Self::Reply>) -> DocHandle {
+    async fn handle(
+        &mut self,
+        _: GetDocClone,
+        _: &mut KameoContext<Self, Self::Reply>,
+    ) -> DocHandle {
         DocHandle(self.doc.clone())
     }
 }
@@ -264,8 +405,19 @@ pub struct ApplyUpdate(pub Vec<u8>);
 
 impl Message<ApplyUpdate> for DocActor {
     type Reply = ();
-    async fn handle(&mut self, ApplyUpdate(update): ApplyUpdate, _: &mut KameoContext<Self, Self::Reply>) {
-        if self.doc.transact_mut().apply_update(Update::decode_v1(&update).unwrap()).is_err() { return; }
+    async fn handle(
+        &mut self,
+        ApplyUpdate(update): ApplyUpdate,
+        _: &mut KameoContext<Self, Self::Reply>,
+    ) {
+        if self
+            .doc
+            .transact_mut()
+            .apply_update(Update::decode_v1(&update).unwrap())
+            .is_err()
+        {
+            return;
+        }
         self.dirty = true;
         let mut encoder = EncoderV1::new();
         encoder.write_var(MSG_SYNC as u32);
@@ -275,7 +427,9 @@ impl Message<ApplyUpdate> for DocActor {
         for client in self.clients.values() {
             let w = wire.clone();
             let c = client.clone();
-            tokio::spawn(async move { let _ = c.tell(WirePayload(w)).send().await; });
+            tokio::spawn(async move {
+                let _ = c.tell(WirePayload(w)).send().await;
+            });
         }
     }
 }
@@ -283,6 +437,30 @@ impl Message<ApplyUpdate> for DocActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HookResult;
+    use async_trait::async_trait;
+    use kameo::actor::Spawn;
+    use yrs::Text;
+
+    struct FailingLoadHook;
+    struct FailingCloseHook;
+
+    #[async_trait]
+    impl Hook for FailingLoadHook {
+        async fn on_load_document(
+            &self,
+            _: OnLoadDocumentPayload<'_>,
+        ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+            Err("load failed".into())
+        }
+    }
+
+    #[async_trait]
+    impl Hook for FailingCloseHook {
+        async fn before_close_dirty(&self, _: BeforeCloseDirtyPayload<'_>) -> HookResult {
+            Err("write failed".into())
+        }
+    }
 
     #[test]
     fn syncstep2_as_update_matches_encoder_output() {
@@ -328,5 +506,56 @@ mod tests {
     fn syncstep2_as_update_returns_none_for_non_sync() {
         let awareness_data = &[MSG_AWARENESS, 0, 0];
         assert!(DocActor::syncstep2_as_update(awareness_data).is_none());
+    }
+
+    #[tokio::test]
+    async fn incarnation_is_stable_for_actor_lifetime_and_unique_per_actor() {
+        let hooks = Arc::new(Vec::<Box<dyn Hook>>::new());
+        let first = DocActor::spawn(DocActorArgs {
+            doc_id: Arc::from("doc"),
+            hooks: Arc::clone(&hooks),
+        });
+        let status_a = first.ask(GetIncarnation).send().await.unwrap();
+        let status_b = first.ask(GetIncarnation).send().await.unwrap();
+        assert_eq!(status_a, status_b);
+
+        let second = DocActor::spawn(DocActorArgs {
+            doc_id: Arc::from("doc"),
+            hooks,
+        });
+        let status_c = second.ask(GetIncarnation).send().await.unwrap();
+        assert_ne!(status_a.0, status_c.0);
+        first.kill();
+        second.kill();
+    }
+
+    #[tokio::test]
+    async fn hook_load_errors_fail_closed() {
+        let actor = DocActor::spawn(DocActorArgs {
+            doc_id: Arc::from("doc"),
+            hooks: Arc::new(vec![Box::new(FailingLoadHook)]),
+        });
+        let status = actor.ask(GetIncarnation).send().await.unwrap();
+        assert!(status.1);
+        actor.kill();
+    }
+
+    #[tokio::test]
+    async fn failed_dirty_close_keeps_actor_alive() {
+        let actor = DocActor::spawn(DocActorArgs {
+            doc_id: Arc::from("doc"),
+            hooks: Arc::new(vec![Box::new(FailingCloseHook)]),
+        });
+        let source = Doc::new();
+        source
+            .get_or_insert_text("content")
+            .insert(&mut source.transact_mut(), 0, "changed");
+        let update = source
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        actor.tell(ApplyUpdate(update)).send().await.unwrap();
+        actor.tell(IdleShutdown).send().await.unwrap();
+        assert!(actor.ask(GetIncarnation).send().await.is_ok());
+        actor.kill();
     }
 }

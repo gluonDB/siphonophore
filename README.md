@@ -188,8 +188,38 @@ async fn main() {
 Messages are prefixed with doc_id for multiplexing:
 
 ```
-[doc_id_len: u8][doc_id: bytes][yjs_payload: bytes]
+[doc_id_len: u8][doc_id: bytes][payload: bytes]
 ```
+
+Each document must complete incarnation negotiation before sending Yjs or
+awareness payloads. Incarnation UUIDs exist only for the lifetime of the
+in-memory document actor.
+
+| Payload | Meaning |
+|---------|---------|
+| `[2, 0]` or `[2, 0, previous_uuid...]` | Join without sharing CRDT state |
+| `[2, 1, current_uuid...]` | Current server incarnation |
+| `[2, 2, current_uuid...]` | Client is ready to begin Yjs sync |
+| `[2, 3, error_code]` | Protocol error |
+
+The server rejects Yjs (`0`) and awareness (`1`) messages until a matching
+`Ready` is received. This prevents a retained client document from merging
+with an independently re-created server document.
+
+Note that message type `2` is `messageAuth` in y-protocols. Siphonophore
+reclaims it for incarnation negotiation and never forwards it to the Yjs
+protocol handler, so clients must not send y-protocols auth messages on this
+transport.
+
+| Error code | Meaning |
+|------------|---------|
+| `1` | Malformed incarnation message |
+| `2` | Payload sent before `Ready` was accepted |
+| `3` | `Ready` did not match the offered incarnation |
+| `4` | An `on_connect` or `on_authenticate` hook rejected the client |
+| `5` | The document failed to load |
+| `6` | The 30s join window expired |
+| `7` | The document was unloaded by the host application |
 
 ## Control Messages (Text WebSocket)
 
@@ -211,32 +241,37 @@ Messages are prefixed with doc_id for multiplexing:
 | `before_close_dirty` | Before unloading dirty doc | Lazypersistence |
 | `after_unload_document` | Doc fully unloaded | Cache invalidation |
 
-## Client Example (JavaScript)
+## JavaScript Client
+
+Install [`@siphonophore/client`](https://www.npmjs.com/package/@siphonophore/client):
+
+```bash
+npm install @siphonophore/client
+```
 
 ```javascript
-import * as Y from 'yjs'
+import { SiphonophoreSocket } from '@siphonophore/client'
 
-const doc = new Y.Doc()
-const ws = new WebSocket('ws://localhost:8080/ws')
+const socket = new SiphonophoreSocket('ws://localhost:8080/ws')
+let incarnation
 
-ws.binaryType = 'arraybuffer'
+socket.onconnect(() => {
+  socket.join('my-doc', incarnation)
+})
 
-ws.onmessage = (event) => {
-  const data = new Uint8Array(event.data)
-  const docIdLen = data[0]
-  const docId = new TextDecoder().decode(data.slice(1, 1 + docIdLen))
-  const payload = data.slice(1 + docIdLen)
-  // Handle Yjs sync message...
-}
-
-function send(docId, payload) {
-  const encoder = new Uint8Array(1 + docId.length + payload.length)
-  encoder[0] = docId.length
-  encoder.set(new TextEncoder().encode(docId), 1)
-  encoder.set(payload, 1 + docId.length)
-  ws.send(encoder)
-}
+socket.onincarnation('my-doc', (current) => {
+  if (incarnation && incarnation !== current) {
+    // Reconcile or replace the application-owned Y.Doc here. Never send the
+    // old Y.Doc to a different incarnation.
+  }
+  incarnation = current
+  socket.ready('my-doc', current)
+  // Start the normal y-protocols sync exchange now.
+})
 ```
+
+The client intentionally has no Yjs dependency; applications layer
+`y-protocols` and their own incarnation reconciliation policy on top.
 
 ## License
 

@@ -1,6 +1,19 @@
 {
   "name": "@siphonophore/client",
   "version": "0.1.0",
+  "description": "JavaScript client for Siphonophore — multiplexed Yjs sync over a single WebSocket",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gluonDB/siphonophore.git"
+  },
+  "keywords": [
+    "yjs",
+    "crdt",
+    "websocket",
+    "collaborative",
+    "sync"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,7 +23,9 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build"
