@@ -14,7 +14,9 @@ pub fn encode_with_doc_id(doc_id: &str, payload: &[u8]) -> Bytes {
 /// Decode doc_id and payload from wire format
 pub fn decode_doc_id(data: &[u8]) -> Option<(&str, &[u8])> {
     let len = *data.first()? as usize;
-    if data.len() < 1 + len { return None; }
+    if data.len() < 1 + len {
+        return None;
+    }
     let doc_id = std::str::from_utf8(&data[1..1 + len]).ok()?;
     Some((doc_id, &data[1 + len..]))
 }

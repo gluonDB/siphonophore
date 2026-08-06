@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use kameo::actor::ActorId;
-use yrs::Doc;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
+use yrs::Doc;
 
 pub type HookResult = Result<(), Box<dyn Error + Send + Sync>>;
 
@@ -18,7 +18,9 @@ impl Context {
     }
 
     pub fn get<T: 'static>(&self) -> Option<&T> {
-        self.0.get(&TypeId::of::<T>()).and_then(|arc| arc.downcast_ref())
+        self.0
+            .get(&TypeId::of::<T>())
+            .and_then(|arc| arc.downcast_ref())
     }
 }
 
@@ -33,9 +35,15 @@ pub struct RequestInfo {
 impl RequestInfo {
     pub fn new(headers: HashMap<String, String>, query_params: HashMap<String, String>) -> Self {
         let token = query_params.get("token").cloned().or_else(|| {
-            headers.get("authorization").and_then(|h| h.strip_prefix("Bearer ").map(|t| t.to_string()))
+            headers
+                .get("authorization")
+                .and_then(|h| h.strip_prefix("Bearer ").map(|t| t.to_string()))
         });
-        Self { headers, query_params, token }
+        Self {
+            headers,
+            query_params,
+            token,
+        }
     }
 }
 
@@ -93,25 +101,42 @@ pub struct BeforeCloseDirtyPayload<'a> {
 #[async_trait]
 pub trait Hook: Send + Sync {
     /// Called when a client first tries to access a document.
-    async fn on_connect(&self, _payload: OnConnectPayload<'_>) -> HookResult { Ok(()) }
+    async fn on_connect(&self, _payload: OnConnectPayload<'_>) -> HookResult {
+        Ok(())
+    }
 
     /// Called to authenticate/authorize. Use `context.insert()` to store user info.
-    async fn on_authenticate(&self, _payload: OnAuthenticatePayload<'_>) -> HookResult { Ok(()) }
+    async fn on_authenticate(&self, _payload: OnAuthenticatePayload<'_>) -> HookResult {
+        Ok(())
+    }
 
     /// Called when a document is first loaded. Return `Some(bytes)` for persisted state.
-    async fn on_load_document(&self, _payload: OnLoadDocumentPayload<'_>) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> { Ok(None) }
+    async fn on_load_document(
+        &self,
+        _payload: OnLoadDocumentPayload<'_>,
+    ) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
+        Ok(None)
+    }
 
     /// Called on every document change.
-    async fn on_change(&self, _payload: OnChangePayload<'_>) -> HookResult { Ok(()) }
+    async fn on_change(&self, _payload: OnChangePayload<'_>) -> HookResult {
+        Ok(())
+    }
 
     /// Called when a client disconnects from a document.
-    async fn on_disconnect(&self, _payload: OnDisconnectPayload<'_>) -> HookResult { Ok(()) }
+    async fn on_disconnect(&self, _payload: OnDisconnectPayload<'_>) -> HookResult {
+        Ok(())
+    }
 
     /// Called on explicit save request (control message or HTTP).
-    async fn on_save(&self, _payload: OnSavePayload<'_>) -> HookResult { Ok(()) }
+    async fn on_save(&self, _payload: OnSavePayload<'_>) -> HookResult {
+        Ok(())
+    }
 
     /// Called before a dirty document is unloaded. Use for lazy persistence.
-    async fn before_close_dirty(&self, _payload: BeforeCloseDirtyPayload<'_>) -> HookResult { Ok(()) }
+    async fn before_close_dirty(&self, _payload: BeforeCloseDirtyPayload<'_>) -> HookResult {
+        Ok(())
+    }
 
     /// Called after a document is fully unloaded from memory.
     fn after_unload_document(&self, _doc_id: &str) {}

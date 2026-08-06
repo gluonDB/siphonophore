@@ -78,26 +78,26 @@
 //! }
 //! ```
 
-mod hooks;
 mod actor;
+mod hooks;
 mod payload;
 mod server;
 
 // Public API
-pub use server::{Server, Handle};
 pub use hooks::{
-    Hook, HookResult, Context, RequestInfo,
-    OnConnectPayload, OnAuthenticatePayload, OnLoadDocumentPayload,
-    OnChangePayload, OnDisconnectPayload, OnSavePayload, BeforeCloseDirtyPayload,
+    BeforeCloseDirtyPayload, Context, Hook, HookResult, OnAuthenticatePayload, OnChangePayload,
+    OnConnectPayload, OnDisconnectPayload, OnLoadDocumentPayload, OnSavePayload, RequestInfo,
 };
+pub use server::{Handle, Server};
 
+pub use async_trait::async_trait;
 pub use axum;
 pub use yrs;
-pub use async_trait::async_trait;
 
 /// Encode a `yrs::Doc` as a full state update (v1).
 /// Convenience wrapper around `doc.transact().encode_state_as_update_v1(...)`.
 pub fn encode_doc_state(doc: &yrs::Doc) -> Vec<u8> {
     use yrs::{ReadTxn, Transact};
-    doc.transact().encode_state_as_update_v1(&yrs::StateVector::default())
+    doc.transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default())
 }
