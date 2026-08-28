@@ -13,7 +13,7 @@ readme = "README.md"
 [dependencies]
 kameo = { version = "0.19.1", features = ["macros"] }
 tokio = { version = "1.48", features = ["rt", "time", "net", "sync"] }
-yrs = { version = "0.24", features = ["sync"] }
+yrs = { version = "0.25", features = ["sync"] }
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 futures = "0.3"
